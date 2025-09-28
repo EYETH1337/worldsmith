@@ -74,38 +74,64 @@ export class WorldData {
         try {
           const worldData = JSON.parse(e.target.result);
           
+          // Validate world data
+          if (!worldData || !Array.isArray(worldData.objects)) {
+            throw new Error('Invalid world data format');
+          }
+          
           // Clear existing objects
           createdObjects.forEach(obj => {
             scene.remove(obj);
           });
           createdObjects.length = 0;
 
-          // Load objects
-          worldData.objects.forEach(objData => {
-            let newObj;
-            
-            if (objData.type === 'shape') {
-              newObj = objectCreator.createShape(objData.shapeType);
-            } else if (objData.type === 'asset') {
-              newObj = objectCreator.createAsset(objData.assetType);
-            } else if (objData.type === 'complex') {
-              newObj = objectCreator.createFromDescription(objData.description);
-            }
-
-            if (newObj) {
-              // Apply saved transforms
-              newObj.position.set(objData.position.x, objData.position.y, objData.position.z);
-              newObj.rotation.set(objData.rotation.x, objData.rotation.y, objData.rotation.z);
-              newObj.scale.set(objData.scale.x, objData.scale.y, objData.scale.z);
+          // Load objects with better error handling
+          let loadedCount = 0;
+          let failedCount = 0;
+          
+          worldData.objects.forEach((objData, index) => {
+            try {
+              let newObj;
               
-              if (objData.color && newObj.material) {
-                newObj.material.color.setHex(objData.color);
+              if (objData.type === 'shape' && objData.shapeType) {
+                newObj = objectCreator.createShape(objData.shapeType);
+              } else if (objData.type === 'asset' && objData.assetType) {
+                newObj = objectCreator.createAsset(objData.assetType);
+              } else if (objData.type === 'complex' && objData.description) {
+                newObj = objectCreator.createFromDescription(objData.description);
+              } else {
+                console.warn(`Object ${index}: Invalid or missing type/data:`, objData);
+                failedCount++;
+                return;
               }
-              
-              createdObjects.push(newObj);
+
+              if (newObj) {
+                // Apply saved transforms with fallback values
+                const pos = objData.position || { x: 0, y: 0, z: 0 };
+                const rot = objData.rotation || { x: 0, y: 0, z: 0 };
+                const scale = objData.scale || { x: 1, y: 1, z: 1 };
+                
+                newObj.position.set(pos.x, pos.y, pos.z);
+                newObj.rotation.set(rot.x, rot.y, rot.z);
+                newObj.scale.set(scale.x, scale.y, scale.z);
+                
+                if (objData.color && newObj.material) {
+                  newObj.material.color.setHex(objData.color);
+                }
+                
+                createdObjects.push(newObj);
+                loadedCount++;
+              } else {
+                console.warn(`Failed to create object ${index}:`, objData);
+                failedCount++;
+              }
+            } catch (error) {
+              console.error(`Error loading object ${index}:`, error, objData);
+              failedCount++;
             }
           });
-          console.log('World loaded:', worldData);
+          
+          console.log(`World loaded: ${loadedCount} objects (${failedCount} failed)`);
           resolve(worldData);
         } catch (error) {
           console.error('Failed to load world:', error);

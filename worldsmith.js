@@ -879,15 +879,9 @@ export class Worldsmith {
       const file = e.target.files[0];
       if (file) {
         try {
-          const worldData = await this.worldData.loadWorld(file, this.objectCreator, this.scene, this.createdObjects);
-          if (worldData && worldData.historyData) {
-            this.historyManager.deserializeHistory(worldData.historyData);
-          } else {
-            this.historyManager.clearHistory();
-          }
-          this.updateObjectCount();
-          this.showToast("World loaded successfully!", 'success');
+          await this.loadWorldFromFile(file);
         } catch (error) {
+          console.error('Load world error:', error);
           this.showToast("Failed to load world: " + error.message, 'warning');
         }
       }
@@ -1560,12 +1554,12 @@ Just speak naturally - I understand context and can help bring your creative vis
         try {
           await this.loadWorldFromFile(file);
         } catch (error) {
-          this.showToast('Failed to load world file', 'warning');
+          console.error('Quick load error:', error);
+          this.showToast('Failed to load world file: ' + error.message, 'warning');
         }
-      } else {
-        // No file selected, try localStorage
-        this.loadWorldFromLocalStorage();
       }
+      // Don't auto-load from localStorage if user cancels file selection
+      // This gives the user explicit control over what they're loading
     });
     
     // Trigger file picker
@@ -1579,15 +1573,32 @@ Just speak naturally - I understand context and can help bring your creative vis
       reader.onload = (e) => {
         try {
           const worldData = JSON.parse(e.target.result);
-          this.applyLoadedWorld(worldData);
-          this.showToast('World loaded!', 'success');
-          resolve();
+          
+          // Validate world data before applying
+          if (!worldData) {
+            throw new Error('Empty world data');
+          }
+          
+          const success = this.applyLoadedWorld(worldData);
+          if (success) {
+            this.showToast('World loaded successfully!', 'success');
+            resolve(worldData);
+          } else {
+            throw new Error('Failed to apply world data');
+          }
         } catch (error) {
+          console.error('Load world error:', error);
+          this.showToast('Failed to load world: ' + error.message, 'warning');
           reject(error);
         }
       };
       
-      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.onerror = () => {
+        const error = new Error('Failed to read file');
+        this.showToast('Failed to read file', 'warning');
+        reject(error);
+      };
+      
       reader.readAsText(file);
     });
   }
@@ -1595,65 +1606,121 @@ Just speak naturally - I understand context and can help bring your creative vis
   loadWorldFromLocalStorage() {
     try {
       const savedData = localStorage.getItem('worldSave');
-      if (savedData) {
-        const worldData = JSON.parse(savedData);
-        this.applyLoadedWorld(worldData);
-        this.showToast('World loaded from auto-save!', 'success');
-      } else {
+      if (!savedData) {
         this.showToast('No auto-save found', 'info');
+        return false;
+      }
+      
+      const worldData = JSON.parse(savedData);
+      const success = this.applyLoadedWorld(worldData);
+      
+      if (success) {
+        this.showToast('World loaded from auto-save!', 'success');
+        return true;
+      } else {
+        throw new Error('Failed to apply auto-save data');
       }
     } catch (error) {
-      this.showToast('Failed to load auto-save', 'warning');
+      console.error('Load from localStorage error:', error);
+      this.showToast('Failed to load auto-save: ' + error.message, 'warning');
+      return false;
     }
   }
   
   applyLoadedWorld(worldData) {
+    // Validate world data
+    if (!worldData || !Array.isArray(worldData.objects)) {
+      console.error('Invalid world data:', worldData);
+      this.showToast('Invalid world file format', 'warning');
+      return false;
+    }
+    
     // Clear existing objects
     this.createdObjects.forEach(obj => {
       this.scene.remove(obj);
     });
     this.createdObjects = [];
     
-    // Load objects
-    worldData.objects.forEach(objData => {
-      let newObj;
-      
-      if (objData.type === 'shape') {
-        newObj = this.objectCreator.createShape(objData.shapeType);
-      } else if (objData.type === 'asset') {
-        newObj = this.objectCreator.createAsset(objData.assetType);
-      } else if (objData.type === 'complex') {
-        newObj = this.objectCreator.createFromDescription(objData.description);
-      }
-      
-      if (newObj) {
-        newObj.position.set(objData.position.x, objData.position.y, objData.position.z);
-        newObj.rotation.set(objData.rotation.x, objData.rotation.y, objData.rotation.z);
-        newObj.scale.set(objData.scale.x, objData.scale.y, objData.scale.z);
+    // Load objects with error handling
+    let loadedCount = 0;
+    let failedCount = 0;
+    
+    worldData.objects.forEach((objData, index) => {
+      try {
+        let newObj;
         
-        if (objData.color && newObj.material) {
-          newObj.material.color.setHex(objData.color);
+        if (objData.type === 'shape' && objData.shapeType) {
+          newObj = this.objectCreator.createShape(objData.shapeType);
+        } else if (objData.type === 'asset' && objData.assetType) {
+          newObj = this.objectCreator.createAsset(objData.assetType);
+        } else if (objData.type === 'complex' && objData.description) {
+          newObj = this.objectCreator.createFromDescription(objData.description);
+        } else {
+          console.warn(`Object ${index}: Invalid or missing type/data:`, objData);
+          failedCount++;
+          return;
         }
         
-        this.createdObjects.push(newObj);
+        if (newObj) {
+          // Apply saved transforms with fallback values
+          const pos = objData.position || { x: 0, y: 0, z: 0 };
+          const rot = objData.rotation || { x: 0, y: 0, z: 0 };
+          const scale = objData.scale || { x: 1, y: 1, z: 1 };
+          
+          newObj.position.set(pos.x, pos.y, pos.z);
+          newObj.rotation.set(rot.x, rot.y, rot.z);
+          newObj.scale.set(scale.x, scale.y, scale.z);
+          
+          // Apply saved color if available
+          if (objData.color && newObj.material) {
+            newObj.material.color.setHex(objData.color);
+          }
+          
+          // Ensure object is in createdObjects array (ObjectCreator already adds to scene)
+          this.createdObjects.push(newObj);
+          loadedCount++;
+        } else {
+          console.warn(`Failed to create object ${index}:`, objData);
+          failedCount++;
+        }
+      } catch (error) {
+        console.error(`Error loading object ${index}:`, error, objData);
+        failedCount++;
       }
     });
     
+    // Show loading results
+    if (failedCount > 0) {
+      this.showToast(`Loaded ${loadedCount} objects (${failedCount} failed)`, 'warning');
+    }
+    
     // Restore history if available
     if (worldData.historyData) {
-      this.historyManager.deserializeHistory(worldData.historyData);
+      try {
+        this.historyManager.deserializeHistory(worldData.historyData);
+      } catch (error) {
+        console.warn('Failed to restore history:', error);
+        this.historyManager.clearHistory();
+      }
     } else {
       this.historyManager.clearHistory();
     }
     
     // Restore UI state if available
     if (worldData.uiState) {
-      this.immersiveMode = worldData.uiState.immersiveMode;
-      this.hideHUD = worldData.uiState.hideHUD;
-      this.updateUIControlButtons();
+      try {
+        this.immersiveMode = worldData.uiState.immersiveMode !== undefined ? 
+          worldData.uiState.immersiveMode : this.immersiveMode;
+        this.hideHUD = worldData.uiState.hideHUD !== undefined ? 
+          worldData.uiState.hideHUD : this.hideHUD;
+        this.updateUIControlButtons();
+      } catch (error) {
+        console.warn('Failed to restore UI state:', error);
+      }
     }
     
     this.updateObjectCount();
+    return true;
   }
   
   // UI Auto-hide system
